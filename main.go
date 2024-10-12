@@ -108,7 +108,7 @@ func skipBytes(socket io.Reader, num uint) {
 	readBytes(socket, num)
 }
 
-func StartConn(socket net.Conn, auth XAuthority) {
+func StartConn(socket net.Conn, auth XAuthority) Connection {
 	endianness = false
 	writeToSock(socket, []byte{0x6c, 0x00})
 	writeToSock(socket, uint16ToBytes(PROTO_VER_MAJOR))
@@ -141,51 +141,60 @@ func StartConn(socket net.Conn, auth XAuthority) {
 		skipBytes(socket, 2)
 		var reason = string(readBytes(socket, uint(lenReason)))
 		fmt.Printf("Got failed reason: %s", reason)
+		return Connection{Errored: true, ErrorReason: reason}
 	} else if status == 1 {
 		fmt.Println("Connection succeeded!")
 		skipBytes(socket, 1)
+		var conn = Connection{}
+		conn.Authority = auth
 		var protoMajor = bytesToUint16(readBytes(socket, 2))
 		var protoMinor = bytesToUint16(readBytes(socket, 2))
+		conn.ServerVersion.Major = protoMajor
+		conn.ServerVersion.Minor = protoMinor
 
 		var extraDataLength = bytesToUint16(readBytes(socket, 2))
 
 		var releaseNumber = bytesToUint32(readBytes(socket, 4))
-		fmt.Printf("Got connection to X server version %d.%d, release %d\n", protoMajor, protoMinor, releaseNumber)
+		conn.Release = releaseNumber
 
 		var resourceIdBase = bytesToUint32(readBytes(socket, 4))
 		var resourceIdMask = bytesToUint32(readBytes(socket, 4))
-		fmt.Printf("Resource ID Base: %d Resource ID Mask: %d\n", resourceIdBase, resourceIdMask)
+		conn.ResourceIDBase = resourceIdBase
+		conn.ResourceIDMask = resourceIdMask
 
 		var motionBufferSize = bytesToUint32(readBytes(socket, 4))
-		fmt.Printf("Motion buffer size: %d\n", motionBufferSize)
+		conn.MotionBufferSize = motionBufferSize
 
 		var vendorLength = bytesToUint16(readBytes(socket, 2))
-		fmt.Printf("Length of vendor: %d\n", vendorLength)
+		conn.VendorLength = vendorLength
 
 		var maxRequestLength = bytesToUint16(readBytes(socket, 2))
-		fmt.Printf("Maximum request length: %d\n", maxRequestLength)
+		conn.MaxRequestLength = maxRequestLength
 
 		var numScreens = bytesToUint8(readBytes(socket, 1))
-		fmt.Printf("Number of screens: %d\n", numScreens)
+		conn.NumScreens = numScreens
 
 		var numFormats = bytesToUint8(readBytes(socket, 1))
-		fmt.Printf("Number of formats: %d\n", numFormats)
+		conn.NumFormats = numFormats
 
-		var imageByteOrder = bytesToUint8(readBytes(socket, 1))
-		fmt.Printf("Image byte order: %s\n", Endianness(imageByteOrder == 0))
+		var imageByteOrder = Endianness(bytesToUint8(readBytes(socket, 1)) != 0)
+		conn.ImageByteOrder = imageByteOrder
 
-		var bitmapFormatBitOrder = bytesToUint8(readBytes(socket, 1))
+		var bitmapFormatBitOrder = Endianness(bytesToUint8(readBytes(socket, 1)) != 0)
+		conn.BitmapFormatBitOrder = bitmapFormatBitOrder
 		var bitmapFormatScanlineUnit = bytesToUint8(readBytes(socket, 1))
+		conn.BitmapFormatScanlineUnit = bitmapFormatScanlineUnit
 		var bitmapFormatScanlinePad = bytesToUint8(readBytes(socket, 1))
-		fmt.Printf("Bitmap format:\n\tbit order: %s\n\tscanline unit: %d\n\tscanline pad: %d\n", Endianness(bitmapFormatBitOrder != 0), bitmapFormatScanlineUnit, bitmapFormatScanlinePad)
+		conn.BitmapFormatScanlinePad = bitmapFormatScanlinePad
 
 		var minKeycode = bytesToUint8(readBytes(socket, 1))
+		conn.KeycodeRange.Min = Keycode(minKeycode)
 		var maxKeycode = bytesToUint8(readBytes(socket, 1))
-		fmt.Printf("Keycode range: %s\n", KeycodeRange{Min: Keycode(minKeycode), Max: Keycode(maxKeycode)})
+		conn.KeycodeRange.Max = Keycode(maxKeycode)
 
 		skipBytes(socket, 4)
 		var vendor = string(readBytes(socket, uint(vendorLength)))
-		fmt.Printf("Vendor: %s\n", vendor)
+		conn.Vendor = vendor
 		var vendorPadding = 4 - (vendorLength % 4)
 		if vendorPadding == 4 {
 			vendorPadding = 0
@@ -205,8 +214,53 @@ func StartConn(socket net.Conn, auth XAuthority) {
 			skipBytes(socket, 5)
 			formats = append(formats, newFormat)
 		}
+		conn.PixmapFormats = formats
 
+		var screens = []Screen{}
+		for i := 0; i < int(numScreens); i++ {
+			var newScreen = Screen{}
+			newScreen.Root = Window(bytesToUint32(readBytes(socket, 4)))
+			newScreen.DefaultColormap = Colormap(bytesToUint32(readBytes(socket, 4)))
+			newScreen.WhitePixel = bytesToUint32(readBytes(socket, 4))
+			newScreen.BlackPixel = bytesToUint32(readBytes(socket, 4))
+			newScreen.CurrentInputMask = SetOfEvent(bytesToUint32(readBytes(socket, 4)))
+			newScreen.WidthPix = bytesToUint16(readBytes(socket, 2))
+			newScreen.HeightPix = bytesToUint16(readBytes(socket, 2))
+			newScreen.WidthMM = bytesToUint16(readBytes(socket, 2))
+			newScreen.HeightMM = bytesToUint16(readBytes(socket, 2))
+			newScreen.InstalledMapsRange.Min = bytesToUint16(readBytes(socket, 2))
+			newScreen.InstalledMapsRange.Max = bytesToUint16(readBytes(socket, 2))
+			newScreen.RootVisual = VisualID(bytesToUint32(readBytes(socket, 4)))
+			newScreen.BackingStores = BackingStores(bytesToUint8(readBytes(socket, 1)))
+			newScreen.SaveUnders = bytesToUint8(readBytes(socket, 1)) != 0
+			newScreen.RootDepth = bytesToUint8(readBytes(socket, 1))
+			newScreen.AllowedDepthsLength = bytesToUint8(readBytes(socket, 1))
+			for i := 0; i < int(newScreen.AllowedDepthsLength); i++ {
+				var newDepth = Depth{}
+				newDepth.Depth = bytesToUint8(readBytes(socket, 1))
+				skipBytes(socket, 1)
+				newDepth.VisualTypesLength = bytesToUint16(readBytes(socket, 2))
+				skipBytes(socket, 4)
+				for i := 0; i < int(newDepth.VisualTypesLength); i++ {
+					var newVisualType = VisualType{}
+					newVisualType.VisualID = VisualID(bytesToUint32(readBytes(socket, 4)))
+					newVisualType.Class = VisualTypeClass(bytesToUint8(readBytes(socket, 1)))
+					newVisualType.BitsPerRGBValue = bytesToUint8(readBytes(socket, 1))
+					newVisualType.ColormapEntries = bytesToUint16(readBytes(socket, 2))
+					newVisualType.RedMask = bytesToUint32(readBytes(socket, 4))
+					newVisualType.GreenMask = bytesToUint32(readBytes(socket, 4))
+					newVisualType.BlueMask = bytesToUint32(readBytes(socket, 4))
+					skipBytes(socket, 4)
+					newDepth.VisualTypes = append(newDepth.VisualTypes, newVisualType)
+				}
+				newScreen.AllowedDepths = append(newScreen.AllowedDepths, newDepth)
+			}
+			screens = append(screens, newScreen)
+		}
+		conn.Screens = screens
+		return conn
 	}
+	return Connection{Errored: true, ErrorReason: fmt.Sprintf("Got unknown status of %d", status)}
 }
 
 type Version struct {
@@ -220,6 +274,15 @@ type Range struct {
 }
 
 func (r Range) String() string {
+	return fmt.Sprintf("%d-%d", r.Min, r.Max)
+}
+
+type Uint16Range struct {
+	Min uint16
+	Max uint16
+}
+
+func (r Uint16Range) String() string {
 	return fmt.Sprintf("%d-%d", r.Min, r.Max)
 }
 
@@ -243,6 +306,24 @@ type PixmapFormat struct {
 type Window uint32
 type Colormap uint32
 type Event uint32
+type VisualID uint32
+type BackingStores uint8
+type VisualTypeClass uint8
+
+const (
+	VisualTypeClassStaticGray = VisualTypeClass(iota)
+	VisualTypeClassStaticGrayScale
+	VisualTypeClassStaticColor
+	VisualTypeClassPseudoColor
+	VisualTypeClassTrueColor
+	VisualTypeClassDirectColor
+)
+
+const (
+	BackingStoresNever = BackingStores(iota)
+	BackingStoresWhenMapped
+	BackingStoresAlways
+)
 
 type SetOfEvent uint32
 
@@ -287,17 +368,45 @@ const (
 	EventUnused = Event(31)
 )
 
+type VisualType struct {
+	VisualID        VisualID
+	Class           VisualTypeClass
+	BitsPerRGBValue uint8
+	ColormapEntries uint16
+	RedMask         uint32
+	GreenMask       uint32
+	BlueMask        uint32
+}
+
+type Depth struct {
+	Depth             uint8
+	VisualTypesLength uint16
+	VisualTypes       []VisualType
+}
+
 type Screen struct {
-	Root             Window
-	DefaultColormap  Colormap
-	WhitePixel       uint32
-	BlackPixel       uint32
-	CurrentInputMask SetOfEvent
+	Root                Window
+	DefaultColormap     Colormap
+	WhitePixel          uint32
+	BlackPixel          uint32
+	CurrentInputMask    SetOfEvent
+	WidthPix            uint16
+	HeightPix           uint16
+	WidthMM             uint16
+	HeightMM            uint16
+	InstalledMapsRange  Uint16Range
+	RootVisual          VisualID
+	BackingStores       BackingStores
+	SaveUnders          bool
+	RootDepth           uint8
+	AllowedDepthsLength uint8
+	AllowedDepths       []Depth
 }
 
 type Connection struct {
 	Errored                  bool
 	ErrorReason              string
+	Authority                XAuthority
 	ServerVersion            Version
 	Release                  uint32
 	ResourceIDBase           uint32
@@ -376,5 +485,5 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	StartConn(conn, ParseXauthorityFile(GetXauthorityFile()))
+	var connection = StartConn(conn, ParseXauthorityFile(GetXauthorityFile()))
 }
